@@ -5,13 +5,13 @@ struct QuickDiskApp: App {
     @StateObject private var model = AppModel()
     @NSApplicationDelegateAdaptor(QuickDiskAppDelegate.self) private var appDelegate
     init() {
-        UserDefaults.standard.register(defaults: ["depth": 6, "theme": "dark", "watch": false])
+        UserDefaults.standard.register(defaults: ["depth": 6, "theme": "dark", "watch": false, "cacheEnabled": true])
     }
     var body: some Scene {
         WindowGroup { ContentView().environmentObject(model).frame(minWidth: 1000, minHeight: 680).onOpenURL { url in if url.isFileURL { model.rememberAccess(for: url); model.scan(url) } } }
         .windowStyle(.hiddenTitleBar).defaultSize(width: 1250, height: 800)
         .commands {
-            CommandGroup(replacing: .newItem) { Button("Сканировать папку…") { model.pickFolder() }.keyboardShortcut("o"); Button("Экспорт отчёта PDF…") { model.exportReport() }.keyboardShortcut("e", modifiers: [.command, .shift]) }
+            CommandGroup(replacing: .newItem) { Button("Сканировать папку…") { model.pickFolder() }.keyboardShortcut("o"); Button("Экспорт отчёта PDF…") { model.exportReport() }.keyboardShortcut("e", modifiers: [.command, .shift]); Button("Повторить сканирование") { if let url = model.sourceURL { model.scan(url) } }.keyboardShortcut("r"); Button("Назад") { model.goBack() }.keyboardShortcut("[", modifiers: .command).disabled(!model.canBack); Button("Вперёд") { model.goForward() }.keyboardShortcut("]", modifiers: .command).disabled(!model.canForward) }
         }
         Settings { SettingsView().environmentObject(model) }
     }
@@ -45,6 +45,7 @@ struct ContentView: View {
             return $0.bytes > $1.bytes
         }
     }
+    var breadcrumbs: [DiskNode] { guard let current = model.current else { return [] }; var nodes: [DiskNode] = []; var cursor: DiskNode? = current; while let node = cursor { nodes.append(node); cursor = node.parent }; return nodes.reversed() }
     var body: some View {
         VStack(spacing: 0) {
             header
@@ -126,7 +127,7 @@ struct ContentView: View {
     }
     func explorer(_ current: DiskNode) -> some View {
         VStack(spacing: 0) {
-            HStack { Text(current.id).font(.system(.caption, design: .monospaced)).lineLimit(1).truncationMode(.middle).textSelection(.enabled); Spacer(); if current.remote { Text("Удалённый источник · только просмотр").font(.caption).foregroundStyle(.orange) }; Button { model.exportReport(root: current, depth: depth, nodes: filtered) } label: { Label("Экспорт PDF", systemImage: "square.and.arrow.up") } }.padding(.horizontal, 22).padding(.vertical, 12)
+            HStack(spacing: 6) { ForEach(breadcrumbs.indices, id: \.self) { index in let node = breadcrumbs[index]; if index > 0 { Image(systemName: "chevron.right").font(.caption2).foregroundStyle(.tertiary) }; Button(node.name.isEmpty ? "/" : node.name) { model.navigate(node) }.buttonStyle(.plain).font(.system(.caption, design: .rounded, weight: node.id == current.id ? .semibold : .regular)).foregroundStyle(node.id == current.id ? .primary : .secondary).lineLimit(1) }; Spacer(); if current.remote { Text("Удалённый источник · только просмотр").font(.caption).foregroundStyle(.orange) }; Button { current.loadAllChildren(); model.exportReport(root: current, depth: depth, nodes: filtered) } label: { Label("Экспорт PDF", systemImage: "square.and.arrow.up") } }.padding(.horizontal, 22).padding(.vertical, 12)
             if let root = model.result?.root, !root.remote, !model.busy { VolumeSummary(root: root) }
             HSplitView {
                 VStack {
@@ -141,7 +142,8 @@ struct ContentView: View {
                         Picker("От", selection: $minimum) { Text("Любой размер").tag(0); Text("10 MB+").tag(1); Text("100 MB+").tag(2); Text("1 GB+").tag(3) }.labelsHidden()
                         Picker("Порядок", selection: $sort) { ForEach(["Размер", "Имя", "Дата"], id: \.self) { Text($0) } }.labelsHidden()
                     }.font(.caption)
-                    List(filtered) { node in
+                    List {
+                        ForEach(filtered) { node in
                         HStack(spacing: 10) {
                             Image(systemName: node.issue != nil ? "lock.trianglebadge.exclamationmark" : node.isDirectory ? "folder.fill" : "doc.fill").foregroundStyle(node.issue != nil ? .orange : .indigo).frame(width: 21)
                             Text(node.name).lineLimit(1)
@@ -149,6 +151,11 @@ struct ContentView: View {
                         }.padding(.vertical, 5).contentShape(Rectangle()).onTapGesture(count: 2) { open(node) }
                         .contextMenu { Button("Открыть") { open(node) }; if !node.remote { Button("Показать в Finder") { NSWorkspace.shared.activateFileViewerSelecting([node.url]) }; Button("Быстрый просмотр") { _ = try? Process.run(URL(fileURLWithPath: "/usr/bin/qlmanage"), arguments: ["-p", node.id]) } }; Button("Скопировать путь") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(node.id, forType: .string) } }
                         .draggable(node.id)
+                        }
+                        if current.hasMoreChildren {
+                            Text("Кэш загружается партиями; порядок применяется к уже загруженным элементам.").font(.caption2).foregroundStyle(.secondary)
+                            Button("Показать ещё · загружено \(current.childrenLoadedCount) из \(current.childrenTotalCount)") { model.loadMoreChildren(current) }.frame(maxWidth: .infinity, alignment: .center)
+                        }
                     }.listStyle(.plain)
                     Text("Двойной щелчок — открыть папку · контекстное меню — Finder и предпросмотр").font(.caption2).foregroundStyle(.secondary)
                 }.padding(20).frame(minWidth: 380, idealWidth: 480)
@@ -162,7 +169,7 @@ struct ContentView: View {
             Text(model.status).font(.caption).foregroundStyle(.secondary).lineLimit(1)
             Spacer()
             if !(model.result?.errors.isEmpty ?? true) { Button { errors = true } label: { Image(systemName: "exclamationmark.triangle").foregroundStyle(.orange) } }
-            Text("v0.2.6").font(.caption2).foregroundStyle(.tertiary)
+            Text("v0.3.0").font(.caption2).foregroundStyle(.tertiary)
         }.padding(14)
     }
     func chartVolume(for current: DiskNode) -> (Int64?, Int64?) {
@@ -182,10 +189,10 @@ struct VolumeSummary: View {
         let free = Int64(values?.volumeAvailableCapacity ?? 0)
         let isVolume = values?.volume?.standardizedFileURL.path == root.url.standardizedFileURL.path
         HStack(spacing: 20) {
-            Label("Свободно: \(humanSize(free))", systemImage: "circle.fill").foregroundStyle(Color(white: 0.48))
+            Label("Свободно: \(humanSize(free))", systemImage: "circle.fill").foregroundStyle(Color(white: 0.48)).help("Свободное место по данным macOS на момент просмотра.")
             if isVolume {
-                Label("Скрыто: \(humanSize(max(0, capacity - free - root.bytes)))", systemImage: "circle.fill").foregroundStyle(Color(white: 0.68))
-                    .help("Оценка скрытого занятого места: снимки APFS, служебные и недоступные данные. Серый сегмент в диаграмме.")
+                Label("Скрыто (оценка): \(humanSize(max(0, capacity - free - root.bytes)))", systemImage: "circle.fill").foregroundStyle(Color(white: 0.68))
+                    .help("Разница между занятой ёмкостью тома и найденными файлами. Может включать снимки и клоны APFS, сжатие, системные и недоступные данные; это приблизительная оценка.")
             }
             Spacer()
         }.font(.caption).padding(.horizontal, 22).padding(.bottom, 10)

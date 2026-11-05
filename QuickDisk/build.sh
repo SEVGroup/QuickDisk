@@ -11,5 +11,11 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp Info.plist "$APP/Contents/Info.plist"
 printf 'APPL????' > "$APP/Contents/PkgInfo"
 if [[ -f QuickDisk.icns ]]; then cp QuickDisk.icns "$APP/Contents/Resources/QuickDisk.icns"; fi
-codesign --force --sign - --entitlements QuickDisk.entitlements "$APP"
+if [[ -n "${DEVELOPER_ID_APPLICATION:-}" ]]; then
+  codesign --force --sign "$DEVELOPER_ID_APPLICATION" --options runtime --timestamp --entitlements QuickDisk.entitlements "$APP"
+else
+  codesign --force --sign - --entitlements QuickDisk.entitlements "$APP"
+fi
+lipo -archs "$APP/Contents/MacOS/QuickDisk" | rg -q 'arm64' && lipo -archs "$APP/Contents/MacOS/QuickDisk" | rg -q 'x86_64'
+codesign --verify --deep --strict "$APP"
 print "Built universal arm64+x86_64: ${APP:A}"

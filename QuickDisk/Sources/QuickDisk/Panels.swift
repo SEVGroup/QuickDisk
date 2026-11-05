@@ -7,6 +7,8 @@ struct SettingsView: View {
     @AppStorage("theme") var theme = "dark"
     @AppStorage("depth") var depth = 6
     @AppStorage("watch") var watch = false
+    @AppStorage("cacheEnabled") var cacheEnabled = true
+    @AppStorage("cacheFolderPath") var cacheFolderPath = ""
     var body: some View {
         VStack(alignment: .leading, spacing: 24) {
             HStack { Text("Настройки").font(.largeTitle.bold()); Spacer(); Button("Закрыть") { dismiss() } }
@@ -14,11 +16,41 @@ struct SettingsView: View {
                 Picker("Оформление", selection: $theme) { Text("Тёмное").tag("dark"); Text("Светлое").tag("light") }
                 Stepper("Глубина диаграммы: \(depth)", value: $depth, in: 2...10)
                 Toggle("Обновлять только изменённые пути автоматически", isOn: $watch).onChange(of: watch) { _, newValue in if newValue { model.startWatching() } else { model.stopWatching() } }
+                Toggle("Использовать кэш для ускорения сканирования", isOn: $cacheEnabled)
+                    .help("Кэш сохраняет метаданные дерева на диск: повторное открытие папки быстрее и не требует сразу пересканировать её целиком. Если отключить, QuickDisk не будет читать или создавать файлы кэша, а каждое сканирование начнётся заново без крупных записей снимка.")
+                if cacheEnabled {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Папка для файлов кэша")
+                            .font(.caption).foregroundStyle(.secondary)
+                        HStack {
+                            Text(cacheFolderPath.isEmpty ? "Стандартная папка QuickDisk" : cacheFolderPath)
+                                .font(.caption).lineLimit(1).truncationMode(.middle)
+                            Spacer()
+                            Button("Выбрать…") {
+                                let panel = NSOpenPanel()
+                                panel.canChooseFiles = false; panel.canChooseDirectories = true; panel.allowsMultipleSelection = false
+                                panel.prompt = "Выбрать папку"
+                                if !cacheFolderPath.isEmpty { panel.directoryURL = URL(fileURLWithPath: cacheFolderPath) }
+                                if panel.runModal() == .OK, let url = panel.url {
+                                    model.setCacheDirectory(url)
+                                    cacheFolderPath = url.standardizedFileURL.path
+                                }
+                            }
+                            Button("По умолчанию") { model.resetCacheDirectory(); cacheFolderPath = "" }
+                                .disabled(cacheFolderPath.isEmpty)
+                        }
+                    }
+                }
             }.formStyle(.grouped)
-            Text("При включённой галочке QuickDisk обновляет изменившиеся файлы и папки, используя готовое дерево для неизменённых поддеревьев. Выключите её, чтобы не отслеживать изменения в фоне. Кнопка повтора выполняет полный скан вручную.").font(.callout).foregroundStyle(.secondary)
-            Text("QuickDisk 0.2.6 · macOS 14+\nУниверсальная сборка: Apple Silicon и Intel.\nТолько просмотр: приложение не удаляет и не перемещает ваши файлы.\nНет рекламы, аккаунтов, аналитики и фоновой проверки обновлений.\nРазрешение на выбранную папку сохраняется локально для повторных сканирований.").font(.callout).foregroundStyle(.secondary)
-            Text("Размеры показывают выделенные блоки, а не уникальное место APFS. Снимки, клоны APFS, сжатие и ограничения доступа могут давать расхождение с данными macOS. Облачные источники показывают размер объектов.").font(.caption).foregroundStyle(.secondary)
-        }.padding(28).frame(width: 600, height: 570)
+            if cacheEnabled {
+                Text("Кэш содержит только имена и метаданные файлов, не их содержимое. При выключении уже созданные файлы кэша остаются на диске, но QuickDisk больше не читает и не обновляет их. Явный экспорт PDF работает отдельно от настройки кэша.").font(.callout).foregroundStyle(.secondary)
+            } else {
+                Text("Кэш отключён: QuickDisk не открывает и не создаёт снимки дерева. Полный скан будет выполняться каждый раз. Уже существующие файлы кэша не удаляются.").font(.callout).foregroundStyle(.secondary)
+            }
+            Text("QuickDisk 0.3.0 · macOS 14+\nУниверсальная сборка: Apple Silicon и Intel.\nТолько просмотр: приложение не удаляет и не перемещает ваши файлы.\nНет рекламы, аккаунтов, аналитики и фоновой проверки обновлений.\nЗакладки доступа и настройки кэша хранятся локально на этом Mac.").font(.callout).foregroundStyle(.secondary)
+            Text("Выделенный объём — сумма блоков файлов, а не уникальное место APFS. Скрытое место — оценка разницы с ёмкостью тома; она может включать снимки и клоны APFS, сжатие, системные и недоступные данные. Облачные источники показывают размер объектов.").font(.caption).foregroundStyle(.secondary)
+            Text("Клавиши: ⌘R — полный повторный скан; ⌘[ / ⌘] — назад и вперёд; ⌘O — выбрать папку.").font(.caption).foregroundStyle(.secondary)
+        }.padding(28).frame(width: 650, height: 740)
     }
 }
 struct RemoteView: View {

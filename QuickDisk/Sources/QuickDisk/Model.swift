@@ -21,7 +21,39 @@ import UniformTypeIdentifiers
     private var stream: FSEventStreamRef?; private var refreshTask: DispatchWorkItem?
     private var pendingChanges: [String: Bool] = [:]; private var pendingFullRefresh = false
     private var activeScopedURL: URL?; private var hasScopedAccess = false
+    private var fileIdentities = Set<FileIdentity>()
+    private var cacheEventID: UInt64 = 0
+    private var isCachedSnapshot = false
     var sourceURL: URL?
+    private var diskCacheEnabled: Bool { UserDefaults.standard.object(forKey: "cacheEnabled") as? Bool ?? true }
+    nonisolated private static var diskCacheIsEnabled: Bool { UserDefaults.standard.object(forKey: "cacheEnabled") as? Bool ?? true }
+    private func cacheDirectoryURL() -> URL? {
+        let defaults = UserDefaults.standard
+        let path = defaults.string(forKey: "cacheFolderPath") ?? ""
+        guard !path.isEmpty else { return nil }
+        if let data = defaults.data(forKey: "cacheFolderBookmark") {
+            do {
+                var stale = false
+                let resolved = try URL(resolvingBookmarkData: data, options: [.withSecurityScope, .withoutUI], relativeTo: nil, bookmarkDataIsStale: &stale)
+                if stale, let refreshed = try? resolved.bookmarkData(options: [.withSecurityScope], includingResourceValuesForKeys: nil, relativeTo: nil) {
+                    defaults.set(refreshed, forKey: "cacheFolderBookmark")
+                }
+                return resolved
+            } catch { return URL(fileURLWithPath: path, isDirectory: true) }
+        }
+        return URL(fileURLWithPath: path, isDirectory: true)
+    }
+    func setCacheDirectory(_ url: URL) {
+        do {
+            let bookmark = try url.bookmarkData(options: [.withSecurityScope], includingResourceValuesForKeys: nil, relativeTo: nil)
+            UserDefaults.standard.set(bookmark, forKey: "cacheFolderBookmark")
+            UserDefaults.standard.set(url.standardizedFileURL.path, forKey: "cacheFolderPath")
+        } catch { message = "Не удалось сохранить доступ к выбранной папке кэша: \(error.localizedDescription)" }
+    }
+    func resetCacheDirectory() {
+        UserDefaults.standard.removeObject(forKey: "cacheFolderBookmark")
+        UserDefaults.standard.removeObject(forKey: "cacheFolderPath")
+    }
     var canBack: Bool { !back.isEmpty }; var canForward: Bool { !forward.isEmpty }
     var volumes: [URL] { FileManager.default.mountedVolumeURLs(includingResourceValuesForKeys: [.volumeIsBrowsableKey], options: [.skipHiddenVolumes]) ?? [] }
     func pickFolder(startAt: URL? = nil) {
@@ -34,8 +66,42 @@ import UniformTypeIdentifiers
     }
     func scanRecent(_ path: String) {
         let url = URL(fileURLWithPath: path)
+        guard diskCacheEnabled else { scan(url); return }
         let hasBookmark = (UserDefaults.standard.dictionary(forKey: "folderBookmarks") as? [String: Data])?[url.standardizedFileURL.path] != nil
-        if hasBookmark { scan(url) } else { pickFolder(startAt: url) }
+        guard hasBookmark else { pickFolder(startAt: url); return }
+        let resolved = authorizedURL(for: url)
+        guard FileManager.default.fileExists(atPath: resolved.path) else { scan(url); return }
+        if activeScopedURL?.standardizedFileURL.path != resolved.standardizedFileURL.path {
+            if hasScopedAccess, let activeScopedURL { activeScopedURL.stopAccessingSecurityScopedResource() }
+            hasScopedAccess = resolved.startAccessingSecurityScopedResource(); activeScopedURL = hasScopedAccess ? resolved : nil
+        }
+        stopWatching(); token.cancel(); token = StopToken(); let run = UUID(); generation = run
+        sourceURL = resolved; busy = true; current = nil; status = "Открытие сохранённого результата…"
+        let cacheDirectory = cacheDirectoryURL()
+        let cacheFile = ScanCacheStore.url(for: resolved.standardizedFileURL.path, directory: cacheDirectory)
+        let cacheScopeStarted = cacheDirectory?.startAccessingSecurityScopedResource() ?? false
+        DispatchQueue.global(qos: .utility).async {
+            let cached = ScanCacheStore.load(path: resolved.standardizedFileURL.path, cacheURL: cacheFile)
+            if cacheScopeStarted { cacheDirectory?.stopAccessingSecurityScopedResource() }
+            DispatchQueue.main.async {
+                guard self.generation == run else { return }
+                guard let (root, eventID, errors, skipped, legacy) = cached else { self.scan(url); return }
+                self.cacheEventID = eventID; self.fileIdentities = []; self.isCachedSnapshot = true
+                self.result = ScanResult(root: root, errors: errors, skipped: skipped, seconds: 0, cancelled: false)
+                self.current = root; self.progress = nil; self.busy = false; self.back = []; self.forward = []; self.duplicateGroups = []
+                self.status = "Открыт сохранённый результат · проверка изменений…"
+                self.recent.removeAll { $0 == path }; self.recent.insert(path, at: 0); self.recent = Array(self.recent.prefix(8)); UserDefaults.standard.set(self.recent, forKey: "recent")
+                if legacy, self.diskCacheEnabled {
+                    let migrationScopeStarted = cacheDirectory?.startAccessingSecurityScopedResource() ?? false
+                    DispatchQueue.global(qos: .utility).async {
+                        defer { if migrationScopeStarted { cacheDirectory?.stopAccessingSecurityScopedResource() } }
+                        try? ScanCacheStore.save(root: root, eventID: eventID, errors: errors, skipped: skipped, to: cacheFile)
+                    }
+                }
+                if UserDefaults.standard.bool(forKey: "watch") { self.scan(resolved, preserveCurrent: true) }
+                else { self.status = "Открыт сохранённый результат · автоматическое обновление выключено" }
+            }
+        }
     }
     func rememberAccess(for url: URL) {
         do {
@@ -55,13 +121,15 @@ import UniformTypeIdentifiers
             return resolved
         } catch { return url }
     }
-    func navigate(_ node: DiskNode) { guard node.isDirectory else { return }; if let current { back.append(current) }; forward = []; self.current = node }
+    func navigate(_ node: DiskNode) { guard node.isDirectory, current?.id != node.id else { return }; if let current { back.append(current) }; forward = []; self.current = node }
     func goBack() { guard let n = back.popLast() else { return }; if let current { forward.append(current) }; current = n }
     func goForward() { guard let n = forward.popLast() else { return }; if let current { back.append(current) }; current = n }
+    func loadMoreChildren(_ node: DiskNode) { _ = node.loadMoreChildren(); if current?.id == node.id { current = node } }
     func home() { if busy { cancel() }; current = nil; back = []; forward = []; pendingChanges.removeAll(); pendingFullRefresh = false; stopWatching() }
     func cancel() { token.cancel(); status = "Остановка…" }
     func cancelDuplicates() { dupToken.cancel() }
-    func scan(_ url: URL) {
+    func scan(_ url: URL, preserveCurrent: Bool = false) {
+        if !preserveCurrent { isCachedSnapshot = false }
         let scanURL = authorizedURL(for: url)
         if activeScopedURL?.standardizedFileURL.path != scanURL.standardizedFileURL.path {
             if hasScopedAccess, let activeScopedURL { activeScopedURL.stopAccessingSecurityScopedResource() }
@@ -69,14 +137,26 @@ import UniformTypeIdentifiers
             activeScopedURL = hasScopedAccess ? scanURL : nil
         }
         stopWatching(); token.cancel(); let newToken = StopToken(); token = newToken; let run = UUID(); generation = run
-        busy = true; progress = nil; current = nil; sourceURL = scanURL; status = "Сканирование \(scanURL.path)"; duplicateGroups = []
+        let scanBaseline = FSEventsGetCurrentEventId(); cacheEventID = UInt64(scanBaseline)
+        let cacheEnabledAtStart = diskCacheEnabled
+        let cacheDirectory = cacheEnabledAtStart ? cacheDirectoryURL() : nil
+        busy = true; progress = nil; if !preserveCurrent { current = nil }; sourceURL = scanURL; status = "Сканирование \(scanURL.path)"; duplicateGroups = []
         DispatchQueue.global(qos: .userInitiated).async {
             let result = Scanner.scan(scanURL, stop: newToken) { progress in
                 DispatchQueue.main.async { guard self.generation == run else { return }; self.progress = progress; if let preview = progress.preview { self.current = preview } }
             }
+            if !result.cancelled && cacheEnabledAtStart && Self.diskCacheIsEnabled {
+                DispatchQueue.main.async { guard self.generation == run else { return }; self.progress = nil; self.status = "Скан завершён · сохранение локального кэша…" }
+                let cacheFile = ScanCacheStore.url(for: scanURL.standardizedFileURL.path, directory: cacheDirectory)
+                let cacheScopeStarted = cacheDirectory?.startAccessingSecurityScopedResource() ?? false
+                defer { if cacheScopeStarted { cacheDirectory?.stopAccessingSecurityScopedResource() } }
+                do { try ScanCacheStore.save(root: result.root, eventID: UInt64(scanBaseline), errors: result.errors, skipped: result.skipped, to: cacheFile) }
+                catch { NSLog("QuickDisk cache save failed: %@", error.localizedDescription) }
+            }
             DispatchQueue.main.async {
                 guard self.generation == run else { return }
-                self.result = result; self.current = result.root; self.busy = false; self.back = []; self.forward = []
+                self.result = result; self.fileIdentities = result.fileIdentities; self.current = result.root; self.busy = false; self.back = []; self.forward = []
+                if !result.cancelled { self.isCachedSnapshot = false }
                 self.status = "\(result.cancelled ? "Остановлено" : "Готово") · \(result.root.count.formatted()) файлов · \(String(format: "%.1f", result.seconds)) с · пропущено: \(result.skipped) · ошибок: \(result.errors.count)"
                 if !result.cancelled { self.recent.removeAll { $0 == scanURL.path }; self.recent.insert(scanURL.path, at: 0); self.recent = Array(self.recent.prefix(8)); UserDefaults.standard.set(self.recent, forKey: "recent"); self.startWatching(); self.flushPendingChangesIfNeeded() }
             }
@@ -87,7 +167,7 @@ import UniformTypeIdentifiers
         busy = true; progress = nil; sourceURL = nil; status = "\(kind): чтение каталога…"
         DispatchQueue.global(qos: .userInitiated).async {
             do { let result = try RemoteScan.scan(kind: kind, host: host, path: path, stop: t)
-                DispatchQueue.main.async { guard self.generation == run else { return }; self.result = result; self.current = result.root; self.busy = false; self.back = []; self.forward = []; self.status = "\(kind) · \(result.root.count) файлов · ошибок: \(result.errors.count) · только просмотр" }
+                DispatchQueue.main.async { guard self.generation == run else { return }; self.result = result; self.fileIdentities = []; self.current = result.root; self.busy = false; self.back = []; self.forward = []; self.status = "\(kind) · \(result.root.count) файлов · ошибок: \(result.errors.count) · только просмотр" }
             } catch { DispatchQueue.main.async { guard self.generation == run else { return }; self.busy = false; self.message = error.localizedDescription; self.status = "Сканирование не завершено" } }
         }
     }
@@ -239,6 +319,7 @@ import UniformTypeIdentifiers
     func startWatching() {
         stopWatching()
         guard UserDefaults.standard.bool(forKey: "watch"), let url = sourceURL else { return }
+        if isCachedSnapshot { if !busy { scan(url, preserveCurrent: true) }; return }
         var context = FSEventStreamContext(version: 0, info: Unmanaged.passUnretained(self).toOpaque(), retain: nil, release: nil, copyDescription: nil)
         stream = FSEventStreamCreate(nil, { _, info, count, rawPaths, eventFlags, _ in
             guard let info else { return }
@@ -256,13 +337,19 @@ import UniformTypeIdentifiers
                 changes.append(ChangedPath(path: URL(fileURLWithPath: pathValues[index]).standardizedFileURL.path, removed: removed))
             }
             DispatchQueue.main.async { model.queueChanges(changes, fullRefresh: fullRefresh) }
-        }, &context, [url.path] as CFArray, FSEventStreamEventId(kFSEventStreamEventIdSinceNow), 2, UInt32(kFSEventStreamCreateFlagUseCFTypes | kFSEventStreamCreateFlagFileEvents))
+        }, &context, [url.path] as CFArray, cacheEventID == 0 ? FSEventStreamEventId(kFSEventStreamEventIdSinceNow) : FSEventStreamEventId(cacheEventID), 2, UInt32(kFSEventStreamCreateFlagUseCFTypes | kFSEventStreamCreateFlagFileEvents))
         if let stream { FSEventStreamSetDispatchQueue(stream, .main); FSEventStreamStart(stream) }
     }
     private func queueChanges(_ changes: [ChangedPath], fullRefresh: Bool) {
         guard UserDefaults.standard.bool(forKey: "watch"), sourceURL != nil else { return }
         pendingFullRefresh = pendingFullRefresh || fullRefresh
-        for change in changes { pendingChanges[change.path] = change.removed }
+        for change in changes {
+            pendingChanges[change.path] = change.removed
+            if change.removed, let sourceURL {
+                let parent = URL(fileURLWithPath: change.path).deletingLastPathComponent().standardizedFileURL.path
+                if parent.hasPrefix(sourceURL.standardizedFileURL.path) { pendingChanges[parent] = false }
+            }
+        }
         refreshTask?.cancel()
         let item = DispatchWorkItem { [weak self] in self?.flushPendingChangesIfNeeded() }
         refreshTask = item; DispatchQueue.main.asyncAfter(deadline: .now() + 1.5, execute: item)
@@ -285,84 +372,19 @@ import UniformTypeIdentifiers
         pendingChanges.removeAll()
         var knownChildren: [String: Set<String>] = [:]
         for change in changes {
-            if let node = node(at: change.path, in: root), node.isDirectory { knownChildren[change.path] = Set(node.children.map(\.id)) }
+            if let node = TreeUpdater.node(at: change.path, in: root), node.isDirectory { knownChildren[change.path] = Set(node.children.map(\.id)) }
         }
         let run = generation; let stop = StopToken(); busy = true; status = "Обновление \(changes.count) изменённых путей…"
         DispatchQueue.global(qos: .utility).async {
             let snapshots = Scanner.snapshotChanges(changes, root: root, knownChildren: knownChildren, stop: stop)
             DispatchQueue.main.async {
                 guard self.generation == run else { return }
-                var updated = 0
-                for snapshot in snapshots where self.apply(snapshot, to: root) { updated += 1 }
+                let updated = TreeUpdater.apply(snapshots, to: root, fileIdentities: &self.fileIdentities)
                 self.busy = false
                 self.status = "Обновлены только изменённые пути · \(updated) · \(root.count.formatted()) файлов"
-                self.current = self.current.flatMap { self.node(at: $0.id, in: root) } ?? root
+                self.current = self.current.flatMap { TreeUpdater.node(at: $0.id, in: root) } ?? root
                 if !self.pendingChanges.isEmpty || self.pendingFullRefresh { self.flushPendingChangesIfNeeded() }
             }
-        }
-    }
-    private func node(at path: String, in root: DiskNode) -> DiskNode? {
-        let target = URL(fileURLWithPath: path).standardizedFileURL.path
-        guard target == root.id || target.hasPrefix(root.id.hasSuffix("/") ? root.id : root.id + "/") else { return nil }
-        if target == root.id { return root }
-        let relative = String(target.dropFirst(root.id.count)).split(separator: "/").map(String.init)
-        var cursor = root; var currentPath = root.id
-        for component in relative {
-            currentPath = URL(fileURLWithPath: currentPath).appendingPathComponent(component).standardizedFileURL.path
-            guard let child = cursor.children.first(where: { $0.id == currentPath }) else { return nil }
-            cursor = child
-        }
-        return cursor
-    }
-    private func apply(_ change: PathSnapshot, to root: DiskNode) -> Bool {
-        if change.path == root.id {
-            guard let snapshot = change.node, root.isDirectory, snapshot.issue == nil else { return false }
-            reconcile(root, with: snapshot); recompute(root); return true
-        }
-        let parentPath = URL(fileURLWithPath: change.path).deletingLastPathComponent().standardizedFileURL.path
-        guard let parent = node(at: parentPath, in: root), parent.isDirectory else { return false }
-        if let index = parent.children.firstIndex(where: { $0.id == change.path }) {
-            guard let snapshot = change.node else { parent.children.remove(at: index); recompute(parent); return true }
-            if snapshot.issue != nil { return false }
-            let existing = parent.children[index]
-            parent.children[index] = merged(existing, snapshot, parent: parent)
-        } else {
-            guard let snapshot = change.node, snapshot.issue == nil else { return false }
-            let inserted = merged(nil, snapshot, parent: parent); parent.children.append(inserted)
-        }
-        recompute(parent); return true
-    }
-    private func merged(_ existing: DiskNode?, _ snapshot: DiskNode, parent: DiskNode) -> DiskNode {
-        guard let existing, existing.isDirectory == snapshot.isDirectory,
-              existing.fingerprint?.device == snapshot.fingerprint?.device,
-              existing.fingerprint?.inode == snapshot.fingerprint?.inode else {
-            snapshot.parent = parent; return snapshot
-        }
-        existing.fingerprint = snapshot.fingerprint; existing.modified = snapshot.modified; existing.issue = snapshot.issue
-        if existing.isDirectory { reconcile(existing, with: snapshot); recompute(existing) }
-        else { existing.bytes = snapshot.bytes; existing.logical = snapshot.logical; existing.count = snapshot.count }
-        existing.parent = parent; return existing
-    }
-    private func reconcile(_ directory: DiskNode, with snapshot: DiskNode) {
-        let previous = Dictionary(uniqueKeysWithValues: directory.children.map { ($0.id, $0) })
-        var children: [DiskNode] = []; children.reserveCapacity(snapshot.children.count)
-        for candidate in snapshot.children {
-            let child = merged(previous[candidate.id], candidate, parent: directory)
-            children.append(child)
-        }
-        directory.children = children
-        directory.fingerprint = snapshot.fingerprint; directory.modified = snapshot.modified; directory.issue = snapshot.issue
-        recompute(directory)
-    }
-    private func recompute(_ directory: DiskNode) {
-        var node: DiskNode? = directory
-        while let current = node {
-            if current.isDirectory {
-                current.bytes = current.children.reduce(0) { $0 + $1.bytes }
-                current.logical = current.children.reduce(0) { $0 + $1.logical }
-                current.count = current.children.reduce(0) { $0 + $1.count }
-            }
-            node = current.parent
         }
     }
     func stopWatching() { refreshTask?.cancel(); pendingChanges.removeAll(); pendingFullRefresh = false; if let stream { FSEventStreamStop(stream); FSEventStreamInvalidate(stream); FSEventStreamRelease(stream) }; stream = nil }
