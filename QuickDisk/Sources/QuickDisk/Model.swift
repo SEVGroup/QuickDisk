@@ -16,6 +16,7 @@ import UniformTypeIdentifiers
     @Published var duplicateBusy = false
     @Published var duplicateStatus = "Сравнение содержимого файлов, включая переименованные копии"
     @Published var recent: [String] = UserDefaults.standard.stringArray(forKey: "recent") ?? []
+    @Published var snapshotHistoryVersion = 0
     private var token = StopToken(); private var dupToken = StopToken()
     private var generation = UUID(); private var back: [DiskNode] = []; private var forward: [DiskNode] = []
     private var stream: FSEventStreamRef?; private var refreshTask: DispatchWorkItem?
@@ -53,6 +54,28 @@ import UniformTypeIdentifiers
     func resetCacheDirectory() {
         UserDefaults.standard.removeObject(forKey: "cacheFolderBookmark")
         UserDefaults.standard.removeObject(forKey: "cacheFolderPath")
+    }
+    func snapshots(for root: DiskNode) -> [DiskSnapshot] {
+        guard !root.remote else { return [] }
+        let directory = cacheDirectoryURL()
+        let cacheFile = ScanCacheStore.url(for: root.id, directory: directory)
+        let started = directory?.startAccessingSecurityScopedResource() ?? false
+        defer { if started { directory?.stopAccessingSecurityScopedResource() } }
+        return SnapshotHistoryStore.load(from: SnapshotHistoryStore.url(for: cacheFile))
+    }
+    func deleteSnapshot(_ id: UUID, for root: DiskNode) {
+        guard !root.remote else { return }
+        let directory = cacheDirectoryURL()
+        let cacheFile = ScanCacheStore.url(for: root.id, directory: directory)
+        let historyFile = SnapshotHistoryStore.url(for: cacheFile)
+        let started = directory?.startAccessingSecurityScopedResource() ?? false
+        defer { if started { directory?.stopAccessingSecurityScopedResource() } }
+        do {
+            try SnapshotHistoryStore.delete(id: id, from: historyFile)
+            snapshotHistoryVersion += 1
+        } catch {
+            message = "Не удалось удалить снимок: \(error.localizedDescription)"
+        }
     }
     var canBack: Bool { !back.isEmpty }; var canForward: Bool { !forward.isEmpty }
     var volumes: [URL] { FileManager.default.mountedVolumeURLs(includingResourceValuesForKeys: [.volumeIsBrowsableKey], options: [.skipHiddenVolumes]) ?? [] }
@@ -128,7 +151,12 @@ import UniformTypeIdentifiers
     func home() { if busy { cancel() }; current = nil; back = []; forward = []; pendingChanges.removeAll(); pendingFullRefresh = false; stopWatching() }
     func cancel() { token.cancel(); status = "Остановка…" }
     func cancelDuplicates() { dupToken.cancel() }
-    func scan(_ url: URL, preserveCurrent: Bool = false) {
+    func saveSnapshot() {
+        guard let sourceURL else { message = "Сначала просканируйте локальный диск или папку."; return }
+        guard diskCacheEnabled else { message = "Чтобы сохранять снимки, включите кэш в настройках. Снимки будут храниться в выбранной папке кэша."; return }
+        scan(sourceURL, saveSnapshot: true)
+    }
+    func scan(_ url: URL, preserveCurrent: Bool = false, saveSnapshot: Bool = false) {
         if !preserveCurrent { isCachedSnapshot = false }
         let scanURL = authorizedURL(for: url)
         if activeScopedURL?.standardizedFileURL.path != scanURL.standardizedFileURL.path {
@@ -139,19 +167,63 @@ import UniformTypeIdentifiers
         stopWatching(); token.cancel(); let newToken = StopToken(); token = newToken; let run = UUID(); generation = run
         let scanBaseline = FSEventsGetCurrentEventId(); cacheEventID = UInt64(scanBaseline)
         let cacheEnabledAtStart = diskCacheEnabled
+        let historyEnabledAtStart = UserDefaults.standard.object(forKey: "historyEnabled") as? Bool ?? true
+        let saveHistoryAtStart = historyEnabledAtStart || saveSnapshot
         let cacheDirectory = cacheEnabledAtStart ? cacheDirectoryURL() : nil
+        let cacheFile = cacheEnabledAtStart ? ScanCacheStore.url(for: scanURL.standardizedFileURL.path, directory: cacheDirectory) : nil
+        let historyFile = cacheFile.map(SnapshotHistoryStore.url(for:))
         busy = true; progress = nil; if !preserveCurrent { current = nil }; sourceURL = scanURL; status = "Сканирование \(scanURL.path)"; duplicateGroups = []
         DispatchQueue.global(qos: .userInitiated).async {
+            var previousRoot: DiskNode?
+            var historyGapBefore = false
+            if cacheEnabledAtStart && saveHistoryAtStart, let cacheFile {
+                let cacheScopeStarted = cacheDirectory?.startAccessingSecurityScopedResource() ?? false
+                previousRoot = ScanCacheStore.load(path: scanURL.standardizedFileURL.path, cacheURL: cacheFile)?.0
+                if let historyFile,
+                   let latest = SnapshotHistoryStore.load(from: historyFile).last,
+                   let attributes = try? FileManager.default.attributesOfItem(atPath: cacheFile.path),
+                   let cacheModified = attributes[.modificationDate] as? Date {
+                    historyGapBefore = cacheModified > latest.date.addingTimeInterval(1)
+                }
+                if cacheScopeStarted { cacheDirectory?.stopAccessingSecurityScopedResource() }
+            }
+            var historyWasSaved = false
+            var historyError: String?
             let result = Scanner.scan(scanURL, stop: newToken) { progress in
                 DispatchQueue.main.async { guard self.generation == run else { return }; self.progress = progress; if let preview = progress.preview { self.current = preview } }
             }
+            var cacheSaved = false
             if !result.cancelled && cacheEnabledAtStart && Self.diskCacheIsEnabled {
                 DispatchQueue.main.async { guard self.generation == run else { return }; self.progress = nil; self.status = "Скан завершён · сохранение локального кэша…" }
-                let cacheFile = ScanCacheStore.url(for: scanURL.standardizedFileURL.path, directory: cacheDirectory)
                 let cacheScopeStarted = cacheDirectory?.startAccessingSecurityScopedResource() ?? false
                 defer { if cacheScopeStarted { cacheDirectory?.stopAccessingSecurityScopedResource() } }
-                do { try ScanCacheStore.save(root: result.root, eventID: UInt64(scanBaseline), errors: result.errors, skipped: result.skipped, to: cacheFile) }
+                do {
+                    try ScanCacheStore.save(root: result.root, eventID: UInt64(scanBaseline), errors: result.errors, skipped: result.skipped, to: cacheFile)
+                    cacheSaved = true
+                }
                 catch { NSLog("QuickDisk cache save failed: %@", error.localizedDescription) }
+            }
+            if !result.cancelled, cacheSaved,
+               (saveSnapshot || (historyEnabledAtStart && (UserDefaults.standard.object(forKey: "historyEnabled") as? Bool ?? true))),
+               let historyFile {
+                let cacheScopeStarted = cacheDirectory?.startAccessingSecurityScopedResource() ?? false
+                let values = try? scanURL.resourceValues(forKeys: [.volumeURLKey, .volumeTotalCapacityKey, .volumeAvailableCapacityKey])
+                let isVolumeRoot = values?.volume?.standardizedFileURL.path == scanURL.standardizedFileURL.path
+                let capacity = isVolumeRoot ? Int64(values?.volumeTotalCapacity ?? 0) : nil
+                let free = isVolumeRoot ? Int64(values?.volumeAvailableCapacity ?? 0) : nil
+                do {
+                    try SnapshotHistoryStore.append(root: result.root, previousRoot: previousRoot,
+                                                    capacity: capacity, free: free,
+                                                    errors: result.errors.count, skipped: result.skipped,
+                                                    gapBefore: historyGapBefore,
+                                                    isManual: saveSnapshot,
+                                                    to: historyFile)
+                    historyWasSaved = true
+                } catch {
+                    historyError = error.localizedDescription
+                    NSLog("QuickDisk snapshot history save failed: %@", error.localizedDescription)
+                }
+                if cacheScopeStarted { cacheDirectory?.stopAccessingSecurityScopedResource() }
             }
             DispatchQueue.main.async {
                 guard self.generation == run else { return }
@@ -159,6 +231,12 @@ import UniformTypeIdentifiers
                 if !result.cancelled { self.isCachedSnapshot = false }
                 self.status = "\(result.cancelled ? "Остановлено" : "Готово") · \(result.root.count.formatted()) файлов · \(String(format: "%.1f", result.seconds)) с · пропущено: \(result.skipped) · ошибок: \(result.errors.count)"
                 if !result.cancelled { self.recent.removeAll { $0 == scanURL.path }; self.recent.insert(scanURL.path, at: 0); self.recent = Array(self.recent.prefix(8)); UserDefaults.standard.set(self.recent, forKey: "recent"); self.startWatching(); self.flushPendingChangesIfNeeded() }
+                if historyWasSaved {
+                    self.snapshotHistoryVersion += 1
+                    if saveSnapshot { self.status += " · снимок сохранён" }
+                } else if saveSnapshot && !result.cancelled {
+                    self.message = historyError.map { "Не удалось сохранить снимок: \($0)" } ?? "Не удалось сохранить снимок: кэш не был записан. Проверьте доступ к папке кэша."
+                }
             }
         }
     }

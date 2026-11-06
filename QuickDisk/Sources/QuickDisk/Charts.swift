@@ -21,8 +21,53 @@ private func inheritedColor(_ index: Int, _ level: Int) -> Color {
                                   blue: base.blueComponent * scale, alpha: 1))
 }
 struct ChartCell { let node: DiskNode; let path: Path; let color: Color; let gradientColor: Color }
+private struct ScanSectorAnimation: View {
+    private let segmentCount = 12
+    private let palette: [Color] = [
+        Color(red: 0.48, green: 0.55, blue: 1), Color(red: 0.58, green: 0.48, blue: 1),
+        Color(red: 0.72, green: 0.43, blue: 0.96), Color(red: 0.87, green: 0.42, blue: 0.78),
+        Color(red: 1, green: 0.48, blue: 0.52), Color(red: 1, green: 0.61, blue: 0.35),
+        Color(red: 1, green: 0.75, blue: 0.34), Color(red: 0.82, green: 0.83, blue: 0.37),
+        Color(red: 0.48, green: 0.82, blue: 0.49), Color(red: 0.32, green: 0.79, blue: 0.68),
+        Color(red: 0.31, green: 0.73, blue: 0.91), Color(red: 0.39, green: 0.63, blue: 1)
+    ]
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { timeline in
+            Canvas { context, size in
+                let center = CGPoint(x: size.width / 2, y: size.height / 2)
+                let radius = min(size.width, size.height) / 2 - 7
+                let lineWidth: CGFloat = 6
+                let gap = 0.045
+                let segmentAngle = (2 * Double.pi) / Double(segmentCount)
+                let cycle = timeline.date.timeIntervalSinceReferenceDate / 0.22
+                let active = cycle.truncatingRemainder(dividingBy: Double(segmentCount))
+                let completeCount = Int(active)
+                let partial = active - Double(completeCount)
+
+                for index in 0..<segmentCount {
+                    let start = -Double.pi / 2 + Double(index) * segmentAngle + gap / 2
+                    let fullEnd = -Double.pi / 2 + Double(index + 1) * segmentAngle - gap / 2
+                    var track = Path()
+                    track.addArc(center: center, radius: radius, startAngle: .radians(start), endAngle: .radians(fullEnd), clockwise: false)
+                    context.stroke(track, with: .color(Color.white.opacity(0.12)), style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
+
+                    let fraction = index < completeCount ? 1.0 : (index == completeCount ? partial : 0)
+                    guard fraction > 0 else { continue }
+                    var fill = Path()
+                    fill.addArc(center: center, radius: radius, startAngle: .radians(start),
+                                endAngle: .radians(start + max(0.002, (fullEnd - start) * fraction)), clockwise: false)
+                    context.stroke(fill, with: .color(palette[index]), style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
+                }
+            }
+        }
+        .accessibilityHidden(true)
+        .allowsHitTesting(false)
+    }
+}
+
 struct DiskChart: View {
-    let root: DiskNode; let depth: Int; let volumeCapacity: Int64?; let volumeFree: Int64?; let onOpen: (DiskNode) -> Void
+    let root: DiskNode; let depth: Int; let volumeCapacity: Int64?; let volumeFree: Int64?; var isScanning = false; let onOpen: (DiskNode) -> Void
     @State private var hovered: DiskNode?
     @State private var layout: [ChartCell] = []
     func cells(_ size: CGSize) -> [ChartCell] {
@@ -105,6 +150,7 @@ struct DiskChart: View {
             // Build the same geometry synchronously when no cached screen layout exists.
             let items = layout.isEmpty ? cells(geometry.size) : layout
             ZStack {
+                if isScanning { ScanSectorAnimation() }
                 Canvas { context, size in
                     for cell in items {
                         let gradient = Gradient(colors: [cell.color, cell.gradientColor, cell.color])

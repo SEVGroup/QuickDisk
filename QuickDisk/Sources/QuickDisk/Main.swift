@@ -5,7 +5,7 @@ struct QuickDiskApp: App {
     @StateObject private var model = AppModel()
     @NSApplicationDelegateAdaptor(QuickDiskAppDelegate.self) private var appDelegate
     init() {
-        UserDefaults.standard.register(defaults: ["depth": 6, "theme": "dark", "watch": false, "cacheEnabled": true])
+        UserDefaults.standard.register(defaults: ["depth": 6, "theme": "dark", "watch": false, "cacheEnabled": true, "historyEnabled": false])
     }
     var body: some Scene {
         WindowGroup { ContentView().environmentObject(model).frame(minWidth: 1000, minHeight: 680).onOpenURL { url in if url.isFileURL { model.rememberAccess(for: url); model.scan(url) } } }
@@ -61,6 +61,7 @@ struct ContentView: View {
             switch item.id {
             case "remote": RemoteView().environmentObject(model)
             case "duplicates": DuplicateView().environmentObject(model)
+            case "history": SnapshotHistoryView().environmentObject(model)
             default: SettingsView().environmentObject(model)
             }
         }
@@ -81,7 +82,7 @@ struct ContentView: View {
             Button { model.goForward() } label: { Image(systemName: "chevron.right") }.disabled(!model.canForward)
             Spacer()
             Button { model.pickFolder() } label: { Label("Папка", systemImage: "folder.badge.plus") }.disabled(model.busy)
-            Button { sheet = "duplicates" } label: { Label("Дубликаты", systemImage: "doc.on.doc") }.disabled(model.busy)
+            Button { sheet = "history" } label: { Label("Изменения", systemImage: "clock.arrow.circlepath") }.disabled(model.result?.root.remote ?? true).help("Сравнить сохранённые снимки сканирования")
             Button { if let url = model.sourceURL { model.scan(url) } } label: { Image(systemName: "arrow.clockwise") }.disabled(model.sourceURL == nil || model.busy).help("Повторить сканирование")
             Button { sheet = "settings" } label: { Image(systemName: "gearshape") }
         }.buttonStyle(.borderless).padding(.horizontal, 22).padding(.vertical, 17)
@@ -101,13 +102,12 @@ struct ContentView: View {
                 HStack(spacing: 16) {
                     homeCard("Любая папка", "Выберите папку или перетащите её в окно", "folder.fill") { model.pickFolder() }
                     homeCard("Сервер и облако", "SSH · S3 · Drive · Dropbox через rclone", "network") { sheet = "remote" }
-                    homeCard("Дубликаты", "Совпадения по содержимому SHA‑256", "doc.on.doc.fill") { sheet = "duplicates" }
                 }
                 if !model.recent.isEmpty {
                     Text("НЕДАВНИЕ СКАНИРОВАНИЯ").font(.caption.bold()).foregroundStyle(.secondary)
                     ForEach(model.recent, id: \.self) { path in HStack { Image(systemName: "clock").foregroundStyle(.secondary); Button(path) { model.scanRecent(path) }.buttonStyle(.plain); Spacer(); Image(systemName: "arrow.up.right") }.padding(10).background(.primary.opacity(0.03), in: RoundedRectangle(cornerRadius: 8)) }
                 }
-                Text("Сканирование читает метаданные. Содержимое файлов читается при проверке дубликатов.").font(.caption).foregroundStyle(.secondary)
+                Text("Сканирование читает метаданные файлов; их содержимое не открывается.").font(.caption).foregroundStyle(.secondary)
             }.padding(32).frame(maxWidth: 1200)
         }
     }
@@ -132,7 +132,7 @@ struct ContentView: View {
             HSplitView {
                 VStack {
                     let volume = chartVolume(for: current)
-                    DiskChart(root: current, depth: depth, volumeCapacity: volume.0, volumeFree: volume.1) { node in open(node) }.frame(minWidth: 440)
+                    DiskChart(root: current, depth: depth, volumeCapacity: volume.0, volumeFree: volume.1, isScanning: model.busy) { node in open(node) }.frame(minWidth: 440)
                     HStack { Text("\(current.count.formatted()) файлов"); Spacer(); Text("На диске \(humanSize(current.bytes)) · размер \(humanSize(current.logical))") }.font(.caption).foregroundStyle(.secondary).padding()
                 }
                 VStack(alignment: .leading, spacing: 12) {
@@ -169,7 +169,7 @@ struct ContentView: View {
             Text(model.status).font(.caption).foregroundStyle(.secondary).lineLimit(1)
             Spacer()
             if !(model.result?.errors.isEmpty ?? true) { Button { errors = true } label: { Image(systemName: "exclamationmark.triangle").foregroundStyle(.orange) } }
-            Text("v0.3.0").font(.caption2).foregroundStyle(.tertiary)
+            Text("v0.4.1").font(.caption2).foregroundStyle(.tertiary)
         }.padding(14)
     }
     func chartVolume(for current: DiskNode) -> (Int64?, Int64?) {
