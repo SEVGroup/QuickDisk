@@ -315,7 +315,21 @@ private enum DirectoryReader {
 }
 struct ChangedPath: Sendable { let path: String; let removed: Bool }
 struct PathSnapshot: @unchecked Sendable { let path: String; let node: DiskNode? }
-struct ScanProgress: Sendable { let files: Int; let bytes: Int64; let path: String; let errors: Int; let preview: DiskNode? }
+struct ScanProgress: Sendable {
+    let files: Int
+    let bytes: Int64
+    let path: String
+    let errors: Int
+    let preview: DiskNode?
+    let expectedFiles: Int?
+    let completed: Bool
+
+    var percent: Int? {
+        if completed { return 100 }
+        guard let expectedFiles, expectedFiles > 0 else { return nil }
+        return min(99, max(0, Int(Double(files) / Double(expectedFiles) * 100)))
+    }
+}
 struct ScanResult: @unchecked Sendable {
     let root: DiskNode; let errors: [String]; let skipped: Int; let seconds: Double; let cancelled: Bool
     let fileIdentities: Set<FileIdentity>
@@ -324,7 +338,7 @@ struct ScanResult: @unchecked Sendable {
     }
 }
 enum Scanner {
-    static func scan(_ url: URL, stop: StopToken, progress: @escaping (ScanProgress) -> Void = { _ in }) -> ScanResult {
+    static func scan(_ url: URL, expectedFiles: Int? = nil, stop: StopToken, progress: @escaping (ScanProgress) -> Void = { _ in }) -> ScanResult {
         let start = Date()
         let rootURL = url.standardizedFileURL
         let root = DiskNode(path: rootURL.path, directory: true)
@@ -390,13 +404,18 @@ enum Scanner {
                         }
                         return copy
                     }
-                    progress(ScanProgress(files: files, bytes: total, path: directory.id, errors: errorCount, preview: preview(root, 3)))
+                    progress(ScanProgress(files: files, bytes: total, path: directory.id, errors: errorCount,
+                                          preview: preview(root, 3), expectedFiles: expectedFiles, completed: false))
                     last = Date()
                 }
                 condition.broadcast(); condition.unlock()
             }
         }
         for n in root.flatten().reversed() where n.isDirectory { n.bytes = n.children.reduce(0) { $0 + $1.bytes }; n.logical = n.children.reduce(0) { $0 + $1.logical }; n.count = n.children.reduce(0) { $0 + $1.count } }
+        if !stop.cancelled {
+            progress(ScanProgress(files: root.count, bytes: root.bytes, path: root.id, errors: errorCount,
+                                  preview: nil, expectedFiles: expectedFiles, completed: true))
+        }
         return ScanResult(root: root, errors: errors, skipped: skipped, seconds: Date().timeIntervalSince(start), cancelled: stop.cancelled, fileIdentities: seen.files)
     }
 

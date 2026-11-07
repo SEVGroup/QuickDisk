@@ -132,7 +132,8 @@ struct ContentView: View {
             HSplitView {
                 VStack {
                     let volume = chartVolume(for: current)
-                    DiskChart(root: current, depth: depth, volumeCapacity: volume.0, volumeFree: volume.1, isScanning: model.busy) { node in open(node) }.frame(minWidth: 440)
+                    DiskChart(root: current, depth: depth, volumeCapacity: volume.0, volumeFree: volume.1,
+                              isScanning: model.busy, scanProgress: model.progress) { node in open(node) }.frame(minWidth: 440)
                     HStack { Text("\(current.count.formatted()) файлов"); Spacer(); Text("На диске \(humanSize(current.bytes)) · размер \(humanSize(current.logical))") }.font(.caption).foregroundStyle(.secondary).padding()
                 }
                 VStack(alignment: .leading, spacing: 12) {
@@ -169,7 +170,7 @@ struct ContentView: View {
             Text(model.status).font(.caption).foregroundStyle(.secondary).lineLimit(1)
             Spacer()
             if !(model.result?.errors.isEmpty ?? true) { Button { errors = true } label: { Image(systemName: "exclamationmark.triangle").foregroundStyle(.orange) } }
-            Text("v0.4.1").font(.caption2).foregroundStyle(.tertiary)
+            Text("v0.4.2").font(.caption2).foregroundStyle(.tertiary)
         }.padding(14)
     }
     func chartVolume(for current: DiskNode) -> (Int64?, Int64?) {

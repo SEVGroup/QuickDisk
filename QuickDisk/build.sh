@@ -11,6 +11,12 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp Info.plist "$APP/Contents/Info.plist"
 printf 'APPL????' > "$APP/Contents/PkgInfo"
 if [[ -f QuickDisk.icns ]]; then cp QuickDisk.icns "$APP/Contents/Resources/QuickDisk.icns"; fi
+RESOURCE_BUNDLE=$(find .build-arm64 -type d -name 'QuickDisk_QuickDisk.bundle' -print -quit)
+if [[ -z "$RESOURCE_BUNDLE" ]]; then
+  print -u2 "SwiftPM resource bundle QuickDisk_QuickDisk.bundle was not found"
+  exit 1
+fi
+ditto "$RESOURCE_BUNDLE" "$APP/Contents/Resources/QuickDisk_QuickDisk.bundle"
 if [[ -n "${DEVELOPER_ID_APPLICATION:-}" ]]; then
   codesign --force --sign "$DEVELOPER_ID_APPLICATION" --options runtime --timestamp --entitlements QuickDisk.entitlements "$APP"
 else

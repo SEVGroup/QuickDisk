@@ -172,14 +172,18 @@ import UniformTypeIdentifiers
         let cacheDirectory = cacheEnabledAtStart ? cacheDirectoryURL() : nil
         let cacheFile = cacheEnabledAtStart ? ScanCacheStore.url(for: scanURL.standardizedFileURL.path, directory: cacheDirectory) : nil
         let historyFile = cacheFile.map(SnapshotHistoryStore.url(for:))
+        let inMemoryBaseline = result?.root.id == scanURL.standardizedFileURL.path ? result?.root : nil
         busy = true; progress = nil; if !preserveCurrent { current = nil }; sourceURL = scanURL; status = "Сканирование \(scanURL.path)"; duplicateGroups = []
         DispatchQueue.global(qos: .userInitiated).async {
-            var previousRoot: DiskNode?
+            var previousRoot = inMemoryBaseline
             var historyGapBefore = false
-            if cacheEnabledAtStart && saveHistoryAtStart, let cacheFile {
+            if cacheEnabledAtStart, let cacheFile {
                 let cacheScopeStarted = cacheDirectory?.startAccessingSecurityScopedResource() ?? false
-                previousRoot = ScanCacheStore.load(path: scanURL.standardizedFileURL.path, cacheURL: cacheFile)?.0
-                if let historyFile,
+                if previousRoot == nil {
+                    previousRoot = ScanCacheStore.load(path: scanURL.standardizedFileURL.path, cacheURL: cacheFile)?.0
+                }
+                if saveHistoryAtStart,
+                   let historyFile,
                    let latest = SnapshotHistoryStore.load(from: historyFile).last,
                    let attributes = try? FileManager.default.attributesOfItem(atPath: cacheFile.path),
                    let cacheModified = attributes[.modificationDate] as? Date {
@@ -189,12 +193,12 @@ import UniformTypeIdentifiers
             }
             var historyWasSaved = false
             var historyError: String?
-            let result = Scanner.scan(scanURL, stop: newToken) { progress in
+            let result = Scanner.scan(scanURL, expectedFiles: previousRoot?.count, stop: newToken) { progress in
                 DispatchQueue.main.async { guard self.generation == run else { return }; self.progress = progress; if let preview = progress.preview { self.current = preview } }
             }
             var cacheSaved = false
             if !result.cancelled && cacheEnabledAtStart && Self.diskCacheIsEnabled {
-                DispatchQueue.main.async { guard self.generation == run else { return }; self.progress = nil; self.status = "Скан завершён · сохранение локального кэша…" }
+                DispatchQueue.main.async { guard self.generation == run else { return }; self.status = "Скан завершён · сохранение локального кэша…" }
                 let cacheScopeStarted = cacheDirectory?.startAccessingSecurityScopedResource() ?? false
                 defer { if cacheScopeStarted { cacheDirectory?.stopAccessingSecurityScopedResource() } }
                 do {
@@ -227,7 +231,7 @@ import UniformTypeIdentifiers
             }
             DispatchQueue.main.async {
                 guard self.generation == run else { return }
-                self.result = result; self.fileIdentities = result.fileIdentities; self.current = result.root; self.busy = false; self.back = []; self.forward = []
+                self.result = result; self.fileIdentities = result.fileIdentities; self.current = result.root; self.busy = false; self.progress = nil; self.back = []; self.forward = []
                 if !result.cancelled { self.isCachedSnapshot = false }
                 self.status = "\(result.cancelled ? "Остановлено" : "Готово") · \(result.root.count.formatted()) файлов · \(String(format: "%.1f", result.seconds)) с · пропущено: \(result.skipped) · ошибок: \(result.errors.count)"
                 if !result.cancelled { self.recent.removeAll { $0 == scanURL.path }; self.recent.insert(scanURL.path, at: 0); self.recent = Array(self.recent.prefix(8)); UserDefaults.standard.set(self.recent, forKey: "recent"); self.startWatching(); self.flushPendingChangesIfNeeded() }
