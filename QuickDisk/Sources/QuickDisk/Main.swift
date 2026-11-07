@@ -1,11 +1,13 @@
 import SwiftUI
 import AppKit
 
+let quickDiskVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.4.3"
+
 struct QuickDiskApp: App {
     @StateObject private var model = AppModel()
     @NSApplicationDelegateAdaptor(QuickDiskAppDelegate.self) private var appDelegate
     init() {
-        UserDefaults.standard.register(defaults: ["depth": 6, "theme": "dark", "watch": false, "cacheEnabled": true, "historyEnabled": false])
+        UserDefaults.standard.register(defaults: ["depth": 6, "theme": "dark", "watch": false, "cacheEnabled": true, "historyEnabled": false, "scanAnimation": ScanAnimation.demFinal.rawValue])
     }
     var body: some Scene {
         WindowGroup { ContentView().environmentObject(model).frame(minWidth: 1000, minHeight: 680).onOpenURL { url in if url.isFileURL { model.rememberAccess(for: url); model.scan(url) } } }
@@ -82,7 +84,7 @@ struct ContentView: View {
             Button { model.goForward() } label: { Image(systemName: "chevron.right") }.disabled(!model.canForward)
             Spacer()
             Button { model.pickFolder() } label: { Label("Папка", systemImage: "folder.badge.plus") }.disabled(model.busy)
-            Button { sheet = "history" } label: { Label("Изменения", systemImage: "clock.arrow.circlepath") }.disabled(model.result?.root.remote ?? true).help("Сравнить сохранённые снимки сканирования")
+            Button { sheet = "history" } label: { Label("Изменения", systemImage: "clock.arrow.circlepath") }.help("Открыть историю изменений диска")
             Button { if let url = model.sourceURL { model.scan(url) } } label: { Image(systemName: "arrow.clockwise") }.disabled(model.sourceURL == nil || model.busy).help("Повторить сканирование")
             Button { sheet = "settings" } label: { Image(systemName: "gearshape") }
         }.buttonStyle(.borderless).padding(.horizontal, 22).padding(.vertical, 17)
@@ -170,7 +172,7 @@ struct ContentView: View {
             Text(model.status).font(.caption).foregroundStyle(.secondary).lineLimit(1)
             Spacer()
             if !(model.result?.errors.isEmpty ?? true) { Button { errors = true } label: { Image(systemName: "exclamationmark.triangle").foregroundStyle(.orange) } }
-            Text("v0.4.2").font(.caption2).foregroundStyle(.tertiary)
+            Text("v\(quickDiskVersion)").font(.caption2).foregroundStyle(.tertiary)
         }.padding(14)
     }
     func chartVolume(for current: DiskNode) -> (Int64?, Int64?) {

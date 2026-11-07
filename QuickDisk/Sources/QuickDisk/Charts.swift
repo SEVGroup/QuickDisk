@@ -23,6 +23,12 @@ private func inheritedColor(_ index: Int, _ level: Int) -> Color {
 struct ChartCell { let node: DiskNode; let path: Path; let color: Color; let gradientColor: Color }
 private struct ScanProgressOverlay: View {
     let progress: ScanProgress?
+    @AppStorage("scanAnimation") private var scanAnimation = ScanAnimation.demFinal.rawValue
+
+    private var selectedAnimation: ScanAnimation {
+        if scanAnimation == "resonantBloom" { return .veilCrossing }
+        return ScanAnimation(rawValue: scanAnimation) ?? .demFinal
+    }
 
     private var percentLabel: String {
         guard let percent = progress?.percent else { return "…%" }
@@ -31,7 +37,7 @@ private struct ScanProgressOverlay: View {
 
     var body: some View {
         ZStack {
-            DemFinalWaveView()
+            DemFinalWaveView(animation: selectedAnimation)
             VStack(spacing: 12) {
                 Text(percentLabel)
                     .font(.system(size: 48, weight: .bold, design: .rounded).monospacedDigit())

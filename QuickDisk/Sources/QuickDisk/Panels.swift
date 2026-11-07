@@ -5,6 +5,7 @@ struct SettingsView: View {
     @EnvironmentObject var model: AppModel
     @Environment(\.dismiss) var dismiss
     @AppStorage("theme") var theme = "dark"
+    @AppStorage("scanAnimation") var scanAnimation = ScanAnimation.demFinal.rawValue
     @AppStorage("depth") var depth = 6
     @AppStorage("watch") var watch = false
     @AppStorage("cacheEnabled") var cacheEnabled = true
@@ -15,6 +16,11 @@ struct SettingsView: View {
             HStack { Text("Настройки").font(.largeTitle.bold()); Spacer(); Button("Закрыть") { dismiss() } }
             Form {
                 Picker("Оформление", selection: $theme) { Text("Тёмное").tag("dark"); Text("Светлое").tag("light") }
+                Picker("Анимация сканирования", selection: $scanAnimation) {
+                    ForEach(ScanAnimation.allCases) { animation in
+                        Text(animation.title).tag(animation.rawValue)
+                    }
+                }
                 Stepper("Глубина диаграммы: \(depth)", value: $depth, in: 2...10)
                 Toggle("Обновлять только изменённые пути автоматически", isOn: $watch).onChange(of: watch) { _, newValue in if newValue { model.startWatching() } else { model.stopWatching() } }
                 Toggle("Использовать кэш для ускорения сканирования", isOn: $cacheEnabled)
@@ -54,10 +60,11 @@ struct SettingsView: View {
             } else {
                 Text("Кэш отключён: новые кэш-файлы и снимки истории не записываются. Полный скан будет выполняться каждый раз; существующая история остаётся в выбранной папке кэша и доступна для просмотра.").font(.callout).foregroundStyle(.secondary)
             }
-            Text("QuickDisk 0.4.2 · macOS 14+\nУниверсальная сборка: Apple Silicon и Intel.\nТолько просмотр: приложение не удаляет и не перемещает ваши файлы.\nНет рекламы, аккаунтов, аналитики и фоновой проверки обновлений.\nЗакладки доступа, кэш и история снимков хранятся локально на этом Mac.").font(.callout).foregroundStyle(.secondary)
+            Text("QuickDisk \(quickDiskVersion) · macOS 14+\nУниверсальная сборка: Apple Silicon и Intel.\nТолько просмотр: приложение не удаляет и не перемещает ваши файлы.\nНет рекламы, аккаунтов, аналитики и фоновой проверки обновлений.\nЗакладки доступа, кэш и история снимков хранятся локально на этом Mac.").font(.callout).foregroundStyle(.secondary)
             Text("Выделенный объём — сумма блоков файлов, а не уникальное место APFS. Скрытое место — оценка разницы с ёмкостью тома; она может включать снимки и клоны APFS, сжатие, системные и недоступные данные. Облачные источники показывают размер объектов.").font(.caption).foregroundStyle(.secondary)
             Text("Клавиши: ⌘R — полный повторный скан; ⌘[ / ⌘] — назад и вперёд; ⌘O — выбрать папку.").font(.caption).foregroundStyle(.secondary)
-        }.padding(28).frame(width: 650, height: 740)
+        }.padding(28).frame(width: 650, height: 780)
+            .onAppear { if scanAnimation == "resonantBloom" { scanAnimation = ScanAnimation.veilCrossing.rawValue } }
     }
 }
 
@@ -70,8 +77,19 @@ struct SnapshotHistoryView: View {
     @State private var toID: UUID?
     @State private var searchText = ""
     @State private var deletePromptID: UUID?
+    @State private var selectedRootPath = ""
 
-    private var root: DiskNode? { model.result?.root }
+    private var historyPaths: [String] {
+        var paths: [String] = []
+        if let result = model.result, !result.root.remote { paths.append(result.root.id) }
+        paths.append(contentsOf: model.recent)
+        return paths.reduce(into: []) { unique, path in if !unique.contains(path) { unique.append(path) } }
+    }
+    private var rootPath: String {
+        if historyPaths.contains(selectedRootPath) { return selectedRootPath }
+        return historyPaths.first ?? ""
+    }
+    private var canSaveSnapshot: Bool { model.result?.root.id == rootPath && model.result?.root.remote == false }
     private var selected: (DiskSnapshot, DiskSnapshot, Int, Int)? {
         guard let fromID, let toID,
               let fromIndex = snapshots.firstIndex(where: { $0.id == fromID }),
@@ -112,7 +130,7 @@ struct SnapshotHistoryView: View {
             HStack {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("История диска").font(.system(size: 27, weight: .bold, design: .rounded))
-                    Text(root?.id ?? "Локальное сканирование").font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle).help(root?.id ?? "")
+                    Text(rootPath.isEmpty ? "Нет недавних сканирований" : rootPath).font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle).help(rootPath)
                 }
                 Spacer()
                 Menu {
@@ -128,9 +146,17 @@ struct SnapshotHistoryView: View {
                     if model.busy { Label("Сканирую…", systemImage: "hourglass") }
                     else { Label("Сохранить снимок", systemImage: "camera.badge.plus") }
                 }.buttonStyle(.borderedProminent).tint(.indigo)
-                    .disabled(model.busy || !cacheEnabled || (root?.remote ?? true))
+                    .disabled(model.busy || !cacheEnabled || !canSaveSnapshot)
                     .help(cacheEnabled ? "Выполнить свежий скан и сохранить его в истории" : "Включите кэш в настройках: снимки хранятся в папке кэша")
                 Button("Закрыть") { dismiss() }
+            }
+            if historyPaths.count > 1 {
+                Picker("Источник истории", selection: $selectedRootPath) {
+                    ForEach(historyPaths, id: \.self) { path in
+                        let name = URL(fileURLWithPath: path).lastPathComponent
+                        Text(name.isEmpty ? path : name).tag(path)
+                    }
+                }.frame(maxWidth: 360, alignment: .leading).help("Выберите папку или диск, историю которого хотите посмотреть")
             }
             HStack(spacing: 9) {
                 Image(systemName: "info.circle.fill").foregroundStyle(.indigo)
@@ -142,7 +168,7 @@ struct SnapshotHistoryView: View {
                     .padding(.horizontal, 4)
             }
             if snapshots.isEmpty {
-                ContentUnavailableView("История пока пуста", systemImage: "clock.arrow.circlepath", description: Text(cacheEnabled ? "Нажмите «Сохранить снимок». QuickDisk выполнит сканирование и добавит первую точку истории." : "Включите кэш в настройках, чтобы сохранять снимки в папке кэша."))
+                ContentUnavailableView("История пока пуста", systemImage: "clock.arrow.circlepath", description: Text(rootPath.isEmpty ? "Сначала выполните сканирование диска или папки. После этого история будет доступна здесь при каждом запуске." : cacheEnabled ? (canSaveSnapshot ? "Нажмите «Сохранить снимок». QuickDisk выполнит сканирование и добавит первую точку истории." : "Для этой папки пока нет сохранённых снимков. Выберите ранее сканировавшуюся папку или откройте её в главном окне, чтобы сохранить снимок.") : "Включите кэш в настройках, чтобы сохранять снимки в папке кэша."))
             } else if snapshots.count == 1 {
                 snapshotCard(snapshots[0])
                 ContentUnavailableView("Есть один снимок", systemImage: "clock", description: Text("Сохраните ещё один снимок, чтобы увидеть, какие папки и файлы изменились."))
@@ -156,14 +182,15 @@ struct SnapshotHistoryView: View {
             }
         }
         .padding(24).frame(minWidth: 1080, minHeight: 760)
-        .onAppear { loadSnapshots() }
+        .onAppear { if selectedRootPath.isEmpty { selectedRootPath = historyPaths.first ?? "" }; loadSnapshots() }
+        .onChange(of: selectedRootPath) { _, _ in loadSnapshots() }
         .onChange(of: model.snapshotHistoryVersion) { _, _ in loadSnapshots(keepSelection: true) }
         .confirmationDialog("Удалить снимок истории?", isPresented: Binding(
             get: { deletePromptID != nil },
             set: { if !$0 { deletePromptID = nil } }
         ), titleVisibility: .visible) {
             Button("Удалить снимок", role: .destructive) {
-                if let root, let deletePromptID { model.deleteSnapshot(deletePromptID, for: root) }
+                if !rootPath.isEmpty, let deletePromptID { model.deleteSnapshot(deletePromptID, for: rootPath) }
                 deletePromptID = nil
             }
             Button("Отмена", role: .cancel) { deletePromptID = nil }
@@ -196,8 +223,8 @@ struct SnapshotHistoryView: View {
 
     private func loadSnapshots(keepSelection: Bool = false) {
         let oldFrom = fromID, oldTo = toID
-        guard let root else { snapshots = []; return }
-        snapshots = model.snapshots(for: root).sorted { $0.date < $1.date }
+        guard !rootPath.isEmpty else { snapshots = []; return }
+        snapshots = model.snapshots(for: rootPath).sorted { $0.date < $1.date }
         if keepSelection, snapshots.contains(where: { $0.id == oldFrom }), snapshots.contains(where: { $0.id == oldTo }) {
             fromID = oldFrom; toID = oldTo
         } else if snapshots.count >= 2 {

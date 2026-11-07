@@ -55,18 +55,16 @@ import UniformTypeIdentifiers
         UserDefaults.standard.removeObject(forKey: "cacheFolderBookmark")
         UserDefaults.standard.removeObject(forKey: "cacheFolderPath")
     }
-    func snapshots(for root: DiskNode) -> [DiskSnapshot] {
-        guard !root.remote else { return [] }
+    func snapshots(for rootPath: String) -> [DiskSnapshot] {
         let directory = cacheDirectoryURL()
-        let cacheFile = ScanCacheStore.url(for: root.id, directory: directory)
+        let cacheFile = ScanCacheStore.url(for: rootPath, directory: directory)
         let started = directory?.startAccessingSecurityScopedResource() ?? false
         defer { if started { directory?.stopAccessingSecurityScopedResource() } }
         return SnapshotHistoryStore.load(from: SnapshotHistoryStore.url(for: cacheFile))
     }
-    func deleteSnapshot(_ id: UUID, for root: DiskNode) {
-        guard !root.remote else { return }
+    func deleteSnapshot(_ id: UUID, for rootPath: String) {
         let directory = cacheDirectoryURL()
-        let cacheFile = ScanCacheStore.url(for: root.id, directory: directory)
+        let cacheFile = ScanCacheStore.url(for: rootPath, directory: directory)
         let historyFile = SnapshotHistoryStore.url(for: cacheFile)
         let started = directory?.startAccessingSecurityScopedResource() ?? false
         defer { if started { directory?.stopAccessingSecurityScopedResource() } }
